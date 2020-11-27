@@ -14,6 +14,11 @@ import com.oracle.bmc.objectstorage.responses.GetNamespaceResponse;
 import com.oracle.bmc.objectstorage.responses.GetObjectResponse;
 import com.oracle.bmc.objectstorage.transfer.UploadConfiguration;
 import com.oracle.bmc.objectstorage.transfer.UploadManager;
+import com.oracle.bmc.retrier.RetryConfiguration;
+import com.oracle.bmc.retrier.RetryOptions;
+import com.oracle.bmc.waiter.ExponentialBackoffDelayStrategy;
+import com.oracle.bmc.waiter.MaxAttemptsTerminationStrategy;
+import com.oracle.cloudsql.streamingfacade.DefaultRetryConfigurationFactory;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.BufferedReader;
@@ -23,6 +28,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 
@@ -31,7 +37,6 @@ public class ObjectStoreCursorStorageImpl implements ICursorStorage {
 
     private final ObjectStorage client;
     private final String compartmentId;
-    private final Bucket bucket;
     private final String namespace;
     private static final String BUCKET_NAME = "csql-streaming";
 
@@ -47,35 +52,6 @@ public class ObjectStoreCursorStorageImpl implements ICursorStorage {
         this.namespace = getNamespace();
         log.info("namespace: "+namespace);
         System.out.println("namespace:"+namespace);
-        try {
-            log.info("Creating bucket: "+BUCKET_NAME);
-            CreateBucketResponse result =  client.createBucket(CreateBucketRequest.builder()
-                    .namespaceName(namespace)
-                    .createBucketDetails(CreateBucketDetails.builder()
-                            .name(BUCKET_NAME)
-                            .compartmentId(compartmentId)
-                            .build())
-                    .build());
-            log.info(result.toString());
-            System.out.println(result);
-        }
-        catch (BmcException ex) {
-            log.warn(ex.getMessage(), ex);
-            System.out.println(ex.getMessage());
-            int code = ex.getStatusCode();
-            log.warn("code="+code);
-            System.out.println("code="+code);
-        }
-        finally {
-            this.bucket = null;
-//            GetBucketResponse bucketResponse = client.getBucket(
-//                    GetBucketRequest.builder()
-//                        .namespaceName(namespace)
-//                        .bucketName(BUCKET_NAME)
-//                        .build());
-//            this.bucket = bucketResponse.getBucket();
-        }
-
     }
 
     private String getNamespace() {
@@ -89,16 +65,12 @@ public class ObjectStoreCursorStorageImpl implements ICursorStorage {
 
     @Override
     public String get(String clientId, String streamId) {
-//        if(bucket==null) {
-//            log.error("bucket is null");
-//            return null;
-//        }
-
         try {
             GetObjectRequest gor = GetObjectRequest.builder()
                     .namespaceName(this.namespace)
                     .bucketName(BUCKET_NAME)
                     .objectName(getObjectName(clientId, streamId))
+                    .retryConfiguration(DefaultRetryConfigurationFactory.get())
                     .build();
 
             GetObjectResponse response = client.getObject(gor);
@@ -115,13 +87,6 @@ public class ObjectStoreCursorStorageImpl implements ICursorStorage {
 
     @Override
     public void store(String clientId, String streamId, String serializedCursor) {
-//        if(bucket==null) {
-//            log.error("bucket is null");
-//            return;
-//        }
-//        if(bucket.getIsReadOnly()) {
-//            log.error("bucket is read-only");
-//        }
         UploadConfiguration uploadConfiguration =
                 UploadConfiguration.builder()
                         .allowMultipartUploads(true)
@@ -138,6 +103,7 @@ public class ObjectStoreCursorStorageImpl implements ICursorStorage {
                 .contentLanguage(null)
                 .contentEncoding("UTF-8")
                 .opcMeta(null)
+                .retryConfiguration(DefaultRetryConfigurationFactory.get())
                 .build();
 
         Path tempPath;

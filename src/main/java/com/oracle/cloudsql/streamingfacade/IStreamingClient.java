@@ -1,27 +1,22 @@
 package com.oracle.cloudsql.streamingfacade;
 
+import java.util.List;
+import java.util.Map;
+
 public interface IStreamingClient {
     /**
      * Publish message into stream id.
      *
      * @param streamId stream id to publish to
-     * @param key key to use
-     * @param payload message payload
+     * @param messages batch of messages to publish
      */
-    boolean publishMessage(String streamId, String key, String payload);
+    boolean publishMessages(String streamId, List<StreamMessage> messages);
 
-    /**
-     * Consume message from the stream (from a given offset).
-     *
-     * @param streamId stream id
-     * @param offset offset to start with
-     */
-    void consumeMessages(String streamId, Long offset, IMessageConsumer consumer);
 
     /**
      * Consume message from the stream (from a given offset).
      *
      * @param streamId stream id
      */
-    void consumeMessages(String streamId, IMessageConsumer consumer);
+    void consumeMessages(String streamId, Map<String, IMessageConsumer> topicConsumers);
 }

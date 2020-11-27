@@ -7,5 +7,5 @@ public interface IMessageConsumer {
      * @param key  message key
      * @param payload message payload
      */
-    void consume(String key, String payload);
+    void consume(StreamMessage message);
 }
