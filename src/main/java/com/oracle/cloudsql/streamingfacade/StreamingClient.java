@@ -1,19 +1,13 @@
 package com.oracle.cloudsql.streamingfacade;
 
 import com.google.gson.Gson;
-import com.oracle.bmc.Region;
 import com.oracle.bmc.auth.BasicAuthenticationDetailsProvider;
 import com.oracle.bmc.auth.InstancePrincipalsAuthenticationDetailsProvider;
-import com.oracle.bmc.model.BmcException;
-import com.oracle.bmc.streaming.StreamAdminClient;
 import com.oracle.bmc.streaming.StreamClient;
 import com.oracle.bmc.streaming.model.*;
 import com.oracle.bmc.streaming.requests.*;
-import com.oracle.bmc.streaming.responses.ConsumerCommitResponse;
+import com.oracle.bmc.streaming.responses.CreateGroupCursorResponse;
 import com.oracle.bmc.streaming.responses.GetMessagesResponse;
-import com.oracle.bmc.streaming.responses.ListStreamsResponse;
-import com.oracle.cloudsql.streamingfacade.objectstore.ICursorStorage;
-import com.oracle.cloudsql.streamingfacade.objectstore.ObjectStoreCursorStorageImpl;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.io.Charsets;
 import org.apache.commons.lang3.StringUtils;
@@ -21,20 +15,25 @@ import org.apache.commons.lang3.StringUtils;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 public class StreamingClient implements IStreamingClient {
 
     private final StreamClient streamClient;
-    private final Gson serialializer;
-    private final ICursorStorage cursorStorage;
-    private final String clientId;
+    private final Gson serializer;
+    private final String instanceId;
+    private final String groupName;
+    private final MessagePoller messagePoller;
 
-    public StreamingClient(final String messageEndpoint, final String clientId, ICursorStorage cursorStorage) {
-        this.cursorStorage = cursorStorage;
+    public StreamingClient(final String messageEndpoint, final String groupName, final String instanceId) {
         this.streamClient = getClient(messageEndpoint);
-        this.serialializer = new Gson();
-        this.clientId = clientId;
+        this.serializer = new Gson();
+        this.instanceId = instanceId;
+        this.groupName = groupName;
+        this.messagePoller = new MessagePoller(streamClient, serializer);
     }
 
     //FIXME use batch publish!!!
@@ -49,7 +48,7 @@ public class StreamingClient implements IStreamingClient {
 
             entries.add(PutMessagesDetailsEntry.builder()
                     .key(message.getTopic().getBytes(StandardCharsets.UTF_8))
-                    .value(serialializer.toJson(message).getBytes(StandardCharsets.UTF_8))
+                    .value(serializer.toJson(message).getBytes(StandardCharsets.UTF_8))
                     .build());
 
         }
@@ -78,88 +77,84 @@ public class StreamingClient implements IStreamingClient {
         }
     }
 
+    private CreateGroupCursorDetails getGroupCursor(String groupName, String instanceName) {
+        return CreateGroupCursorDetails.builder()
+                .commitOnGet(true)
+                .groupName(groupName)
+                .type(CreateGroupCursorDetails.Type.TrimHorizon)
+                .instanceName(instanceName)
+                .build();
+    }
 
+    private CreateGroupCursorRequest getCreateCursorRequest(String streamId, String groupName, String instanceName) {
+        return CreateGroupCursorRequest.builder()
+                .streamId(streamId)
+                .opcRequestId(UUID.randomUUID().toString())
+                .retryConfiguration(DefaultRetryConfigurationFactory.get())
+                .createGroupCursorDetails(getGroupCursor(groupName, instanceName))
+                .build();
+    }
 
     @Override
-    public void consumeMessages(String streamId, Map<String, IMessageConsumer> topicConsumers) {
-        String cursor = cursorStorage.get(clientId, streamId);
-        Long offset = decodeCursor(cursor);
-        consumeMessages(streamId, offset, topicConsumers);
-    }
-
-    private String getCursorToReadAllMessages(String streamId) {
-        CreateCursorDetails createCursorDetails =
-                CreateCursorDetails.builder()
-                        .type(CreateCursorDetails.Type.TrimHorizon)
-                        .partition("0")
-                        .build();
-
-        CreateCursorRequest createCursorRequest =
-                CreateCursorRequest.builder()
-                        .streamId(streamId)
-                        .createCursorDetails(createCursorDetails)
-                        .build();
-
-        return streamClient.createCursor(createCursorRequest).getCursor()
-                .getValue();
-    }
-
-    private String getCursorForOnlineProcessing(String streamId) {
-        CreateCursorDetails createCursorDetails =
-                CreateCursorDetails.builder()
-                        .type(CreateCursorDetails.Type.Latest) // reads messages only while online
-                        .partition("0")
-                        .build();
-
-        CreateCursorRequest createCursorRequest =
-                CreateCursorRequest.builder()
-                        .streamId(streamId)
-                        .createCursorDetails(createCursorDetails)
-                        .build();
-
-        return streamClient.createCursor(createCursorRequest).getCursor()
-                .getValue();
-    }
-
-    private String getCursorRequest(String streamId, Long offset) {
-        CreateCursorDetails createCursorDetails =
-                CreateCursorDetails.builder()
-                        .type(CreateCursorDetails.Type.AfterOffset)
-                        // Possible error: BmcException: (400, InvalidParameter, false) Offset 8 is invalid
-                        .offset(offset) //After offset 29
-                        .partition("0")
-                        .build();
-
-        CreateCursorRequest createCursorRequest =
-                CreateCursorRequest.builder()
-                        .streamId(streamId)
-                        .createCursorDetails(createCursorDetails)
-                        .build();
-
-        return streamClient.createCursor(createCursorRequest).getCursor()
-                .getValue();
-
-    }
-
-    private void consumeMessages(String streamId, Long offset, Map<String, IMessageConsumer> topicConsumer) {
-        if(topicConsumer==null || topicConsumer.isEmpty()) {
+    public void consumeMessages(String streamId, Map<String, IMessageConsumer> topicConsumer) {
+        if (topicConsumer == null || topicConsumer.isEmpty()) {
             log.warn("No consumers registered");
             return;
         }
-        String cursor = null;
-        if(offset!=null) {
-            try {
-                cursor = getCursorRequest(streamId, offset);
-            } catch (BmcException ex) {
-                log.warn(ex.getMessage(), ex);
-            }
-        }
-        if(cursor==null) {
-            cursor = getCursorToReadAllMessages(streamId);
+
+        CreateGroupCursorResponse cursorResponse = streamClient.createGroupCursor(getCreateCursorRequest(streamId, groupName, instanceId));
+        String cursor = cursorResponse.getCursor().getValue();
+
+        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+        executor.scheduleAtFixedRate(messagePoller.streamId(streamId).cursor(cursor).topicConsumer(topicConsumer), 0, 1, TimeUnit.SECONDS);
+    }
+
+
+
+
+
+
+    private StreamClient getClient(String endpoint) {
+        BasicAuthenticationDetailsProvider authProvider =
+                InstancePrincipalsAuthenticationDetailsProvider.builder().build();
+
+        StreamClient streamClient = new StreamClient(authProvider);
+        streamClient.setEndpoint(endpoint);
+        return streamClient;
+    }
+
+    static class MessagePoller implements Runnable {
+        private String streamId;
+        private String cursor;
+        private Map<String, IMessageConsumer> topicConsumer;
+        private final StreamClient streamClient;
+        private final Gson serializer;
+
+        public MessagePoller(StreamClient streamClient, Gson serializer) {
+            this.streamClient = streamClient;
+            this.serializer = serializer;
         }
 
-        // No error handling (there is a high chance of getting a throttling error using a tight loop)
-        while (true) { // or your own exit condition
+        public MessagePoller streamId(String streamId) {
+            this.streamId = streamId;
+            return this;
+        }
+
+        public MessagePoller cursor(String cursor) {
+            this.cursor = cursor;
+            return this;
+        }
+
+        public MessagePoller topicConsumer(Map<String, IMessageConsumer> topicConsumer) {
+            this.topicConsumer = topicConsumer;
+            return this;
+        }
+
+
+        @Override
+        public void run() {
+            // No error handling (there is a high chance of getting a throttling error using a tight loop)
+
             GetMessagesRequest getMessagesRequest =
                     GetMessagesRequest.builder()
                             .streamId(streamId)
@@ -177,7 +172,7 @@ public class StreamingClient implements IStreamingClient {
                 IMessageConsumer consumer = topicConsumer.get(topicName);
                 if(consumer!=null) {
                     String _payload = new String(message.getValue(), StandardCharsets.UTF_8);
-                    StreamMessage msg = serialializer.fromJson(_payload, StreamMessage.class);
+                    StreamMessage msg = serializer.fromJson(_payload, StreamMessage.class);
                     consumer.consume(msg);
                 } else {
                     log.warn("no consumer registered for "+topicName);
@@ -185,53 +180,18 @@ public class StreamingClient implements IStreamingClient {
             });
 
             cursor = getMessagesResponse.getOpcNextCursor();
-            System.out.println("cursor=" + cursor);
-            String serialized = new String(Base64.getDecoder().decode(cursor), Charsets.UTF_8);
-            System.out.println("serialized=" + serialized);
+            //System.out.println("cursor=" + cursor);
+            //String serialized = new String(Base64.getDecoder().decode(cursor), Charsets.UTF_8);
+            //System.out.println("serialized=" + serialized);
 
-            //FIXME async? Sleeping there anyway - shoudl react on retry strategy error
-            //FIXME what if we are unable to store the cursor?
-            try {
-                cursorStorage.store(clientId, streamId, cursor);
-            }
-            catch (Throwable t) {
-                log.error(t.getMessage(), t);
-            }
 
 //            ConsumerCommitResponse commitResponse = streamClient.consumerCommit(ConsumerCommitRequest.builder()
 //                    .cursor(this.cursor)
 //                    .streamId(streamId)
 //                    .build());
 
-            try {
-                Thread.sleep(1_000);
-            } catch (InterruptedException ex) {
 
-            }
         }
 
     }
-
-    private StreamClient getClient(String endpoint) {
-        BasicAuthenticationDetailsProvider authProvider =
-                InstancePrincipalsAuthenticationDetailsProvider.builder().build();
-
-        StreamClient streamClient = new StreamClient(authProvider);
-        streamClient.setEndpoint(endpoint);
-        return streamClient;
-    }
-
-    private Long decodeCursor(String cursor) {
-        if (cursor != null && !cursor.isEmpty()) {
-            String cursorDecoded = new String(Base64.getDecoder().decode(cursor), Charsets.UTF_8);
-            try {
-                final CursorSerialization serializedCursor = serialializer.fromJson(cursorDecoded, CursorSerialization.class);
-                return serializedCursor.getOffset();
-            } catch (Throwable t) {
-                log.warn(t.getMessage(), t);
-            }
-        }
-        return null;
-    }
-
 }

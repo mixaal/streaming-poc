@@ -1,27 +1,31 @@
 package com.oracle.cloudsql.streamingfacade;
 
-import com.oracle.bmc.Region;
-import com.oracle.cloudsql.streamingfacade.objectstore.ObjectStoreCursorStorageImpl;
 import java.util.*;
 
 public class Main {
 
     public static void main(String []args) {
-        String objectStoreCompartmentId = "ocid1.compartment.oc1..aaaaaaaawdyzbt7uzg7pjlfbbwqamcbnsyol7kle4tdevhdm3icqpfubxjwa";
-        String endpoint = "https://cell-1.streaming.us-ashburn-1.oci.oraclecloud.com";
-        String clientId = "resource-manager-22";
-        clientId = "new-client-must-read-everything";
-        // pixaal - 1 partition - test-oke - oraclebigdatadb
-        String streamId = "ocid1.stream.oc1.iad.amaaaaaayrywvyya5kyz37krqusyzq62oehq24lm7me6sagl7ntcetqrkocq";
-        // mixaal - 3 partitions - test-oke - oraclebigdatadb
-        // String streamId = "ocid1.stream.oc1.iad.amaaaaaayrywvyyalpdke4kwwkf7ua6nebekynheqr3cyvv2kvu7t5bdeoja;
+        if(args.length!=2) {
+            System.err.println("Usage\n java -jar <.jar> consumer <clientId>\nor:\n java -jar <.jar> producer <numberOfMessages>");
+        }
+        int numOfMessages = 0;
+        String clientId= "";
+
+        boolean producer = "producer".equals(args[0].toLowerCase());
+        if(producer) {
+            numOfMessages = new Integer(args[1]);
+        } else {
+            clientId= args[1];
+        }
+        String endpoint = "https://cell-1.streaming.us-phoenix-1.oci.oraclecloud.com";
+        // cloudsql-metering - 2 partitions - test-oke - oraclebigdatadb
+        String streamId = "ocid1.stream.oc1.phx.amaaaaaayrywvyya44k27kifwmwezu3dumu3xtrgyyos27tgixs7kilbr3qq";
         StreamingClient client = new StreamingClient(
                 endpoint,
-                clientId,
-                new ObjectStoreCursorStorageImpl(Region.US_PHOENIX_1, objectStoreCompartmentId)
+                "metering-services",
+                clientId
         );
-        if(args.length>0) {
-            int numOfMessages = new Integer(args[0]);
+        if(producer) {
             List<StreamMessage> messages = new ArrayList<>();
             for (int i=0; i<numOfMessages; i++) {
                 messages.add(
